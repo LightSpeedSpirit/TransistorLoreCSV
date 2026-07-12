@@ -10,9 +10,69 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+import os
+import sys
+import vdf
 
-GAME = Path("/home/deck/.local/share/Steam/steamapps/common/Transistor/Content")
-OUT  = Path("/home/deck/nix/home/Proj/TransistorLoreCSV/transistor_lore.csv")
+def find_game_path(app_id: int) -> Path:
+    """Find a Steam game's install path via libraryfolders.vdf + appmanifest."""
+    if "STEAM_DIR" in os.environ:
+        steam_roots = [Path(os.environ["STEAM_DIR"])]
+    elif sys.platform == "win32":
+        import winreg
+        steam_roots = []
+        for hive, key in [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
+            (winreg.HKEY_CURRENT_USER,  r"Software\Valve\Steam"),
+        ]:
+            try:
+                with winreg.OpenKey(hive, key) as k:
+                    steam_roots.append(Path(winreg.QueryValueEx(k, "InstallPath")[0]))
+                    break
+            except OSError:
+                pass
+    else:
+        # $HOME may be overridden by a chroot; derive real home from $USER/$LOGNAME
+        user = os.environ.get("USER") or os.environ.get("LOGNAME")
+        real_home = Path(f"/home/{user}") if user and Path(f"/home/{user}").is_dir() else Path.home()
+        steam_roots = [
+            real_home / ".steam/steam",
+            real_home / ".local/share/Steam",
+        ]
+
+    steam_root = next((r for r in steam_roots if r.is_dir()), None)
+    if not steam_root:
+        raise FileNotFoundError("Steam root not found.")
+
+    lf_path = steam_root / "steamapps/libraryfolders.vdf"
+    library_folders = [steam_root / "steamapps"]
+    if lf_path.exists():
+        with lf_path.open() as f:
+            data = vdf.load(f)
+        for entry in data.get("libraryfolders", {}).values():
+            if isinstance(entry, dict) and "path" in entry:
+                library_folders.append(Path(entry["path"]) / "steamapps")
+
+    for lib in library_folders:
+        manifest = lib / f"appmanifest_{app_id}.acf"
+        try:
+            with manifest.open() as f:
+                info = vdf.load(f)
+            install_dir = info["AppState"]["installdir"]
+            return lib / "common" / install_dir
+        except FileNotFoundError:
+            continue
+
+    raise FileNotFoundError(f"App {app_id} not found in any Steam library.")
+
+APP_ID = 237930
+game_path = find_game_path(APP_ID)
+print(f"Game path: {game_path}")
+
+OUT  = Path("./transistor_lore.csv")
+GAME = game_path / "Content"
+
 
 # ── Canonical level order (from ProgressData.txt LevelProgression) ─────────────
 LEVEL_ORDER = [
